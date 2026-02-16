@@ -7,7 +7,8 @@ from sklearn.metrics import mean_absolute_percentage_error
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 from tensorflow.keras.callbacks import EarlyStopping
-import datetime
+import datetime 
+from tensorflow.keras.layers import Dropout
 
 st.set_page_config(page_title="UPI LSTM Forecast", layout="wide")
 
@@ -59,10 +60,17 @@ selected_field = st.sidebar.selectbox(
 # ===============================
 data = df[[selected_field]].dropna()
 
-scaler = MinMaxScaler()
-scaled_data = scaler.fit_transform(data)
+# Log transform
+data_log = np.log1p(data)
 
-lookback = 12
+# First differencing
+data_diff = data_log.diff().dropna()
+
+scaler = MinMaxScaler()
+scaled_data = scaler.fit_transform(data_diff)
+
+
+lookback = 18
 
 def create_sequences(data, lookback):
     X, y = [], []
@@ -81,11 +89,19 @@ y_train, y_test = y[:split], y[split:]
 # ===============================
 # BUILD LSTM MODEL
 # ===============================
+from tensorflow.keras.layers import Dropout
+
 model = Sequential([
-    LSTM(64, return_sequences=True, input_shape=(lookback, 1)),
+    LSTM(128, return_sequences=True, input_shape=(lookback, 1)),
+    Dropout(0.2),
+    LSTM(64, return_sequences=True),
+    Dropout(0.2),
     LSTM(32),
     Dense(1)
 ])
+
+model.compile(optimizer="adam", loss="mse")
+
 
 model.compile(optimizer="adam", loss="mse")
 
@@ -123,7 +139,21 @@ for _ in range(forecast_months):
     future_forecast.append(next_pred)
     current_sequence = np.append(current_sequence[:,1:,:], [[next_pred]], axis=1)
 
+# Reverse scaling
 future_forecast = scaler.inverse_transform(future_forecast)
+
+# Reverse differencing
+last_log_value = data_log.iloc[-1]
+
+future_values = []
+current_value = last_log_value
+
+for diff in future_forecast:
+    current_value = current_value + diff
+    future_values.append(current_value)
+
+future_values = np.expm1(future_values)
+
 
 last_date = df.index[-1]
 future_dates = [
