@@ -66,7 +66,7 @@ forecast_months = st.sidebar.slider(
 )
 
 # =====================================================
-# DATA PREP
+# DATA PREPARATION
 # =====================================================
 data = df[[selected_field]].dropna()
 
@@ -88,7 +88,7 @@ def create_sequences(dataset, lookback):
 X, y = create_sequences(scaled_data, lookback)
 
 if len(X) < 10:
-    st.error("Not enough data for training.")
+    st.error("Not enough historical data for training.")
     st.stop()
 
 split = int(len(X) * 0.8)
@@ -97,7 +97,7 @@ X_train, X_test = X[:split], X[split:]
 y_train, y_test = y[:split], y[split:]
 
 # =====================================================
-# MODEL
+# BUILD MODEL
 # =====================================================
 model = Sequential([
     LSTM(128, return_sequences=True, input_shape=(lookback, 1)),
@@ -125,9 +125,8 @@ with st.spinner("Training LSTM model..."):
 # =====================================================
 # ERROR CALCULATION
 # =====================================================
-test_predictions = model.predict(X_test)
+test_predictions = model.predict(X_test, verbose=0)
 test_predictions = scaler.inverse_transform(test_predictions)
-y_test_actual = scaler.inverse_transform(y_test)
 
 last_log_value = data_log.iloc[lookback + split - 1].values[0]
 reconstructed = []
@@ -153,7 +152,11 @@ current_sequence = last_sequence.reshape(1, lookback, 1)
 for _ in range(forecast_months):
     next_pred = model.predict(current_sequence, verbose=0)[0]
     future_forecast.append(next_pred)
-    current_sequence = np.append(current_sequence[:, 1:, :], [[next_pred]], axis=1)
+    current_sequence = np.append(
+        current_sequence[:, 1:, :],
+        [[next_pred]],
+        axis=1
+    )
 
 future_forecast = scaler.inverse_transform(future_forecast)
 
@@ -167,11 +170,9 @@ for diff in future_forecast:
 
 future_values = np.expm1(future_values)
 
-# Convert Million → Crore
-future_values_cr = np.array(future_values) / 10
-actual_values_cr = df[selected_field] / 10
-
-# Create Dates
+# =====================================================
+# CREATE FORECAST DATAFRAME
+# =====================================================
 last_date = df.index[-1]
 future_dates = [
     last_date + pd.DateOffset(months=i+1)
@@ -180,23 +181,23 @@ future_dates = [
 
 forecast_df = pd.DataFrame({
     "Date": future_dates,
-    "Forecast (Cr)": future_values_cr
+    "Forecast": future_values
 })
 
 # =====================================================
 # GROWTH %
 # =====================================================
-start_value = actual_values_cr.iloc[-1]
-end_value = future_values_cr[-1]
+start_value = df[selected_field].iloc[-1]
+end_value = future_values[-1]
 
 growth_percent = ((end_value - start_value) / start_value) * 100
 
 # =====================================================
 # MAX VALUE
 # =====================================================
-max_value = forecast_df["Forecast (Cr)"].max()
+max_value = forecast_df["Forecast"].max()
 max_date = forecast_df.loc[
-    forecast_df["Forecast (Cr)"].idxmax(), "Date"
+    forecast_df["Forecast"].idxmax(), "Date"
 ]
 
 # =====================================================
@@ -206,24 +207,24 @@ fig = go.Figure()
 
 fig.add_trace(go.Scatter(
     x=df.index,
-    y=actual_values_cr,
+    y=df[selected_field],
     mode='lines',
-    name='Actual (Cr)'
+    name='Actual'
 ))
 
 fig.add_trace(go.Scatter(
     x=forecast_df["Date"],
-    y=forecast_df["Forecast (Cr)"],
+    y=forecast_df["Forecast"],
     mode='lines+markers',
-    name='Forecast (Cr)'
+    name='Forecast'
 ))
 
 fig.update_layout(
-    title=f"{selected_field} Forecast Projection (in Crore)",
+    title=f"{selected_field} Forecast Projection",
     template="plotly_white",
     height=550,
     xaxis_title="Date",
-    yaxis_title="Transaction Count (Crore)"
+    yaxis_title="Transaction Count (Million)"
 )
 
 st.plotly_chart(fig, use_container_width=True)
@@ -233,12 +234,12 @@ st.plotly_chart(fig, use_container_width=True)
 # =====================================================
 col1, col2, col3, col4 = st.columns(4)
 
-col1.metric("Max Projected (Cr)", f"{max_value:,.2f}")
+col1.metric("Max Projected Value", f"{max_value:,.2f}")
 col2.metric("Date of Maximum", max_date.strftime("%Y-%m"))
 col3.metric("Model Error (MAPE %)", f"{mape:.2f}%")
 col4.metric("Growth Over Range (%)", f"{growth_percent:.2f}%")
 
-st.markdown("### Forecast Table (in Crore)")
+st.markdown("### Forecast Table")
 st.dataframe(forecast_df, use_container_width=True)
 
 st.success("Forecast generated successfully.")
