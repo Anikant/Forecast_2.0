@@ -115,7 +115,7 @@ early_stop = EarlyStopping(patience=5, restore_best_weights=True)
 with st.spinner("Training LSTM model..."):
     model.fit(
         X_train, y_train,
-        epochs=60,
+        epochs=150,
         batch_size=8,
         validation_data=(X_test, y_test),
         callbacks=[early_stop],
