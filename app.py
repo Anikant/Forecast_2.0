@@ -95,8 +95,23 @@ def load_daily_data():
 # DATA PREP FUNCTION
 # =====================================================
 def prepare_data(series, lookback):
+
+    # 🔥 Ensure numeric (CRITICAL FIX)
+    series = (
+        series.astype(str)
+        .str.replace(",", "", regex=False)
+    )
+
+    series = pd.to_numeric(series, errors="coerce")
+    series = series.dropna()
+    series = series.astype(float)
+
+    if len(series) <= lookback:
+        st.error("Not enough clean numeric data after preprocessing.")
+        st.stop()
+
     data_log = np.log1p(series)
-    data_diff = data_log.diff().dropna()
+    data_diff = pd.Series(data_log).diff().dropna()
 
     scaler = MinMaxScaler()
     scaled = scaler.fit_transform(data_diff.values.reshape(-1, 1))
