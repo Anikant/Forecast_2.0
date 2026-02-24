@@ -50,12 +50,22 @@ daily_projection = st.sidebar.checkbox(
     "Enable Daily Projection (Separate LSTM Model)"
 )
 
-forecast_horizon = st.sidebar.slider(
-    "Forecast Horizon",
-    min_value=1,
-    max_value=30 if daily_projection else 24,
-    value=7 if daily_projection else 6
-)
+# NEW LOGIC: Separate sliders
+if daily_projection:
+    daily_horizon = st.sidebar.slider(
+        "Select Number of Days for Daily Projection",
+        min_value=7,
+        max_value=180,
+        value=30
+    )
+    forecast_horizon = daily_horizon
+else:
+    forecast_horizon = st.sidebar.slider(
+        "Forecast Horizon (Months)",
+        min_value=1,
+        max_value=24,
+        value=6
+    )
 
 # =====================================================
 # LOAD MONTHLY DATA (DEFAULT)
@@ -84,11 +94,9 @@ def load_daily_data():
         st.stop()
 
     df = pd.read_excel(file_path, engine="openpyxl")
-
     df["DATE"] = pd.to_datetime(df["DATE"])
     df = df.sort_values("DATE")
     df.set_index("DATE", inplace=True)
-
     return df
 
 # =====================================================
@@ -96,30 +104,18 @@ def load_daily_data():
 # =====================================================
 def prepare_data(series, lookback):
 
-    # Convert to string
     series = series.astype(str)
-
-    # Remove everything except digits and decimal point
     series = series.str.replace(r"[^\d.]", "", regex=True)
-
-    # Convert to numeric
     series = pd.to_numeric(series, errors="coerce")
-
-    # Drop NaN
     series = series.dropna()
-
-    # Ensure float
     series = series.astype(float)
 
     if len(series) <= lookback + 5:
         st.error(
-            f"After cleaning, only {len(series)} valid numeric rows remain. "
-            "Check merged_upi_transactions.xlsx format."
+            f"After cleaning, only {len(series)} valid numeric rows remain."
         )
-        st.write("Preview of cleaned data:", series.head(20))
         st.stop()
 
-    # Log transform
     data_log = np.log1p(series)
     data_diff = pd.Series(data_log).diff().dropna()
 
@@ -164,7 +160,7 @@ def train_model(X_train, y_train, X_test, y_test, lookback):
     return model
 
 # =====================================================
-# MONTHLY MODE (DEFAULT)
+# MONTHLY MODE
 # =====================================================
 if not daily_projection:
 
@@ -183,10 +179,7 @@ if not daily_projection:
     X, y, scaler, data_log = prepare_data(series, lookback)
 
     split = int(len(X) * 0.8)
-    X_train, X_test = X[:split], X[split:]
-    y_train, y_test = y[:split], y[split:]
-
-    model = train_model(X_train, y_train, X_test, y_test, lookback)
+    model = train_model(X[:split], y[:split], X[split:], y[split:], lookback)
 
     last_sequence = scaler.transform(
         data_log.diff().dropna().values.reshape(-1, 1)
@@ -220,22 +213,14 @@ if not daily_projection:
     st.markdown("## Monthly Projection Results")
 
 # =====================================================
-# =====================================================
-# DAILY MODE (SEPARATE WINDOW)
+# DAILY MODE
 # =====================================================
 else:
 
     df = load_daily_data()
 
-    # Normalize columns safely
     df.columns = df.columns.str.strip()
-
-    # Exclude DATE column automatically
-    available_fields = [col for col in df.columns if col.upper() != "DATE"]
-
-    if not available_fields:
-        st.error("No valid transaction columns found in merged_upi_transactions.xlsx")
-        st.stop()
+    available_fields = [col for col in df.columns]
 
     selected_field = st.sidebar.selectbox(
         "Select Daily Projection Field",
@@ -247,15 +232,8 @@ else:
     lookback = 30
     X, y, scaler, data_log = prepare_data(series, lookback)
 
-    if len(X) < 10:
-        st.error("Not enough daily historical data for training.")
-        st.stop()
-
     split = int(len(X) * 0.8)
-    X_train, X_test = X[:split], X[split:]
-    y_train, y_test = y[:split], y[split:]
-
-    model = train_model(X_train, y_train, X_test, y_test, lookback)
+    model = train_model(X[:split], y[:split], X[split:], y[split:], lookback)
 
     last_sequence = scaler.transform(
         data_log.diff().dropna().values.reshape(-1, 1)
@@ -286,7 +264,19 @@ else:
         for i in range(forecast_horizon)
     ]
 
+    # 🔥 SHOW MAX PROJECTION DAY
+    max_idx = np.argmax(future_vals)
+    st.success(
+        f"📈 Maximum projected transactions on "
+        f"{future_dates[max_idx].date()} "
+        f"→ {int(future_vals[max_idx]):,}"
+    )
+
+    # 🔥 Limit graph to last 30 days
+    series = series.tail(30)
+
     st.markdown("## 🔥 Daily Projection Results")
+
 # =====================================================
 # FORECAST DF
 # =====================================================
