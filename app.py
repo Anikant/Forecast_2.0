@@ -56,19 +56,46 @@ if uploaded_file is None:
 @st.cache_data
 def load_data(file):
     df = pd.read_excel(file)
-    df.columns = df.columns.str.strip()
+
+    # Normalize column names (CRITICAL FIX)
+    df.columns = (
+        df.columns
+        .str.strip()
+        .str.lower()
+        .str.replace("  ", " ")
+    )
+
+    # Create mapping dictionary (flexible matching)
+    column_mapping = {}
+
+    for col in df.columns:
+        if "date" in col:
+            column_mapping[col] = "DATE"
+
+        elif "financial" in col:
+            column_mapping[col] = "Total UPI financial transactional logs"
+
+        elif "non" in col:
+            column_mapping[col] = "Total UPI non financial transactional logs"
+
+        elif "total" in col and "upi" in col:
+            column_mapping[col] = "total upi transactions"
+
+    df = df.rename(columns=column_mapping)
 
     required_cols = [
         "DATE",
-        "Total UPI FinancialTRANSACTION LOG",
-        "Total UPI Non-FinancialTRANSACTION LOG",
-        "total Upi Transaction"
+        "Total UPI financial transactional logs",
+        "Total UPI non financial transactional logs",
+        "total upi transactions"
     ]
 
-    for col in required_cols:
-        if col not in df.columns:
-            st.error(f"Missing required column: {col}")
-            st.stop()
+    missing = [c for c in required_cols if c not in df.columns]
+
+    if missing:
+        st.error(f"Missing required columns: {missing}")
+        st.write("Available columns detected:", list(df.columns))
+        st.stop()
 
     df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
     df = df.dropna(subset=["DATE"])
