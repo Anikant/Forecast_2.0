@@ -96,20 +96,30 @@ def load_daily_data():
 # =====================================================
 def prepare_data(series, lookback):
 
-    # 🔥 Ensure numeric (CRITICAL FIX)
-    series = (
-        series.astype(str)
-        .str.replace(",", "", regex=False)
-    )
+    # Convert to string
+    series = series.astype(str)
 
+    # Remove everything except digits and decimal point
+    series = series.str.replace(r"[^\d.]", "", regex=True)
+
+    # Convert to numeric
     series = pd.to_numeric(series, errors="coerce")
+
+    # Drop NaN
     series = series.dropna()
+
+    # Ensure float
     series = series.astype(float)
 
-    if len(series) <= lookback:
-        st.error("Not enough clean numeric data after preprocessing.")
+    if len(series) <= lookback + 5:
+        st.error(
+            f"After cleaning, only {len(series)} valid numeric rows remain. "
+            "Check merged_upi_transactions.xlsx format."
+        )
+        st.write("Preview of cleaned data:", series.head(20))
         st.stop()
 
+    # Log transform
     data_log = np.log1p(series)
     data_diff = pd.Series(data_log).diff().dropna()
 
