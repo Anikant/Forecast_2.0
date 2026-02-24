@@ -193,7 +193,8 @@ if not daily_projection:
     st.markdown("## Monthly Projection Results")
 
 # =====================================================
-# DAILY MODE (FIXED — NO ARTIFICIAL DIP)
+# =====================================================
+# DAILY MODE (TREND-PRESERVING FIX)
 # =====================================================
 else:
 
@@ -219,11 +220,10 @@ else:
         st.error("Not enough daily data for stable training.")
         st.stop()
 
-    # 🔥 NO DIFFERENCING
-    data_log = np.log1p(series)
-
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(data_log.values.reshape(-1, 1))
+    # 🔥 USE STANDARD SCALER (NOT MINMAX)
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    scaled = scaler.fit_transform(series.values.reshape(-1, 1))
 
     lookback = 30
     X, y = [], []
@@ -247,8 +247,14 @@ else:
         forecasts.append(pred)
         current_seq = np.append(current_seq[:, 1:, :], [[pred]], axis=1)
 
-    forecasts = scaler.inverse_transform(forecasts)
-    future_vals = np.expm1(np.array(forecasts).flatten())
+    forecasts = scaler.inverse_transform(np.array(forecasts))
+
+    future_vals = forecasts.flatten()
+
+    # 🔥 TREND CORRECTION (REMOVES DIP)
+    recent_trend = series.tail(14).pct_change().mean()
+    for i in range(len(future_vals)):
+        future_vals[i] = future_vals[i] * (1 + recent_trend * 0.5)
 
     future_dates = [
         series.index[-1] + pd.DateOffset(days=i+1)
@@ -262,7 +268,7 @@ else:
         f"{future_dates[max_idx].date()} → {int(future_vals[max_idx]):,}"
     )
 
-    # 🔥 Graph only last 30 days
+    # Show only last 30 days
     series = series.tail(30)
 
     st.markdown("## 🔥 Daily Projection Results")
