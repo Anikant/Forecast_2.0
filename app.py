@@ -13,7 +13,7 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
 
 # =====================================================
-# 🔒 FULL DETERMINISM (CRITICAL)
+# 🔒 FULL DETERMINISM
 # =====================================================
 SEED = 42
 os.environ["PYTHONHASHSEED"] = str(SEED)
@@ -35,93 +35,103 @@ st.set_page_config(page_title="UPI LSTM Forecast", layout="wide")
 
 st.markdown("""
 <h1 style='text-align: center; color: #1F4E79;'>
-UPI Transaction Forecasting Engine (Advanced Deterministic LSTM)
+UPI Transaction Forecasting Engine (Monthly + Daily Deterministic LSTM)
 </h1>
 """, unsafe_allow_html=True)
 
 st.markdown("---")
 
 # =====================================================
-# LOAD DATA
+# LOAD DATA (Cloud Safe)
 # =====================================================
+uploaded_file = st.file_uploader(
+    "Upload merged_upi_transactions.xlsx",
+    type=["xlsx"]
+)
+
+if uploaded_file is None:
+    st.warning("Please upload merged_upi_transactions.xlsx to proceed.")
+    st.stop()
+
 @st.cache_data
-def load_data():
-    file_path = "data/UPI_Transactions.xlsx"
+def load_data(file):
+    df = pd.read_excel(file)
+    df.columns = df.columns.str.strip()
 
-    if not os.path.exists(file_path):
-        st.error("UPI_Transactions.xlsx not found in data folder.")
-        st.stop()
+    required_cols = [
+        "DATE",
+        "Total UPI financial transactional logs",
+        "Total UPI non financial transactional logs",
+        "total upi transactions"
+    ]
 
-    df = pd.read_excel(file_path, engine="openpyxl")
+    for col in required_cols:
+        if col not in df.columns:
+            st.error(f"Missing required column: {col}")
+            st.stop()
 
-    df["Date"] = pd.to_datetime(df["Date"])
-    df = df.sort_values("Date")
-    df.set_index("Date", inplace=True)
+    df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
+    df = df.dropna(subset=["DATE"])
+    df = df.sort_values("DATE")
+    df.set_index("DATE", inplace=True)
 
     return df
 
-df = load_data()
+df = load_data(uploaded_file)
 
 # =====================================================
 # SIDEBAR
 # =====================================================
 st.sidebar.header("Forecast Settings")
 
-fields = ["Remitter", "Benificiary", "Total"]
+fields = [
+    "Total UPI financial transactional logs",
+    "Total UPI non financial transactional logs",
+    "total upi transactions"
+]
 
 selected_field = st.sidebar.selectbox(
     "Select Projection Field",
     fields
 )
 
-forecast_months = st.sidebar.slider(
-    "Forecast Horizon (Months)",
+# 🔥 NEW DAILY PROJECTION TOGGLE (ABOVE SLIDER)
+daily_projection = st.sidebar.checkbox(
+    "Enable Daily Projection (Separate LSTM Model)"
+)
+
+forecast_horizon = st.sidebar.slider(
+    "Forecast Horizon",
     min_value=1,
-    max_value=24,
-    value=6
+    max_value=30 if daily_projection else 24,
+    value=7 if daily_projection else 6
 )
 
 # =====================================================
-# DATA PREPARATION
+# DATA PREPARATION FUNCTION
 # =====================================================
-data = df[[selected_field]].dropna()
+def prepare_data(series, lookback):
+    data_log = np.log1p(series)
+    data_diff = data_log.diff().dropna()
 
-data_log = np.log1p(data)
-data_diff = data_log.diff().dropna()
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(data_diff.values.reshape(-1, 1))
 
-scaler = MinMaxScaler()
-scaled_data = scaler.fit_transform(data_diff)
-
-lookback = 18
-
-def create_sequences(dataset, lookback):
     X, y = [], []
-    for i in range(lookback, len(dataset)):
-        X.append(dataset[i - lookback:i])
-        y.append(dataset[i])
-    return np.array(X), np.array(y)
+    for i in range(lookback, len(scaled)):
+        X.append(scaled[i-lookback:i])
+        y.append(scaled[i])
 
-X, y = create_sequences(scaled_data, lookback)
-
-if len(X) < 10:
-    st.error("Not enough historical data for training.")
-    st.stop()
-
-split = int(len(X) * 0.8)
-
-X_train, X_test = X[:split], X[split:]
-y_train, y_test = y[:split], y[split:]
+    return np.array(X), np.array(y), scaler, data_log
 
 # =====================================================
-# MODEL BUILD (CACHED)
+# MODEL TRAIN FUNCTION
 # =====================================================
 @st.cache_resource
-def train_model(X_train, y_train, X_test, y_test):
+def train_model(X_train, y_train, X_test, y_test, lookback):
 
     model = Sequential([
-        LSTM(128, return_sequences=True, input_shape=(lookback, 1)),
-        Dropout(0.2),
-        LSTM(64, return_sequences=True),
+        LSTM(64, return_sequences=True, input_shape=(lookback, 1)),
         Dropout(0.2),
         LSTM(32),
         Dense(1)
@@ -137,101 +147,113 @@ def train_model(X_train, y_train, X_test, y_test):
     model.fit(
         X_train,
         y_train,
-        epochs=150,
+        epochs=120,
         batch_size=8,
         validation_data=(X_test, y_test),
-        shuffle=False,          # 🔥 critical for determinism
+        shuffle=False,
         callbacks=[early_stop],
         verbose=0
     )
 
     return model
 
-with st.spinner("Training deterministic LSTM model..."):
-    model = train_model(X_train, y_train, X_test, y_test)
+# =====================================================
+# MONTHLY MODEL
+# =====================================================
+if not daily_projection:
+
+    series = df[selected_field].resample("M").sum()
+
+    lookback = 18
+    X, y, scaler, data_log = prepare_data(series, lookback)
+
+    split = int(len(X) * 0.8)
+    X_train, X_test = X[:split], X[split:]
+    y_train, y_test = y[:split], y[split:]
+
+    model = train_model(X_train, y_train, X_test, y_test, lookback)
+
+    last_sequence = scaler.transform(
+        data_log.diff().dropna().values.reshape(-1, 1)
+    )[-lookback:]
+
+    current_seq = last_sequence.reshape(1, lookback, 1)
+    forecasts = []
+
+    for _ in range(forecast_horizon):
+        pred = model.predict(current_seq, verbose=0)[0]
+        forecasts.append(pred)
+        current_seq = np.append(current_seq[:, 1:, :], [[pred]], axis=1)
+
+    forecasts = scaler.inverse_transform(forecasts)
+
+    last_log = data_log.iloc[-1]
+    future_vals = []
+    curr = last_log
+
+    for diff in forecasts:
+        curr += diff[0]
+        future_vals.append(curr)
+
+    future_vals = np.expm1(future_vals)
+
+    future_dates = [
+        series.index[-1] + pd.DateOffset(months=i+1)
+        for i in range(forecast_horizon)
+    ]
 
 # =====================================================
-# ERROR CALCULATION
+# DAILY MODEL (SEPARATE LSTM)
 # =====================================================
-test_predictions = model.predict(X_test, verbose=0)
-test_predictions = scaler.inverse_transform(test_predictions)
+else:
 
-last_log_value = data_log.iloc[lookback + split - 1].values[0]
-reconstructed = []
+    series = df[selected_field]
 
-current_value = last_log_value
-for diff in test_predictions:
-    current_value += diff[0]
-    reconstructed.append(current_value)
+    lookback = 30
+    X, y, scaler, data_log = prepare_data(series, lookback)
 
-reconstructed = np.expm1(reconstructed)
+    split = int(len(X) * 0.8)
+    X_train, X_test = X[:split], X[split:]
+    y_train, y_test = y[:split], y[split:]
 
-actual_values = df[selected_field].iloc[
-    lookback + split:
-].values[:len(reconstructed)]
+    model = train_model(X_train, y_train, X_test, y_test, lookback)
 
-mape = mean_absolute_percentage_error(actual_values, reconstructed) * 100
+    last_sequence = scaler.transform(
+        data_log.diff().dropna().values.reshape(-1, 1)
+    )[-lookback:]
 
-# =====================================================
-# FUTURE FORECAST
-# =====================================================
-last_sequence = scaled_data[-lookback:]
-current_sequence = last_sequence.reshape(1, lookback, 1)
+    current_seq = last_sequence.reshape(1, lookback, 1)
+    forecasts = []
 
-future_forecast = []
+    for _ in range(forecast_horizon):
+        pred = model.predict(current_seq, verbose=0)[0]
+        forecasts.append(pred)
+        current_seq = np.append(current_seq[:, 1:, :], [[pred]], axis=1)
 
-for _ in range(forecast_months):
-    next_pred = model.predict(current_sequence, verbose=0)[0]
-    future_forecast.append(next_pred)
+    forecasts = scaler.inverse_transform(forecasts)
 
-    current_sequence = np.append(
-        current_sequence[:, 1:, :],
-        [[next_pred]],
-        axis=1
-    )
+    last_log = data_log.iloc[-1]
+    future_vals = []
+    curr = last_log
 
-future_forecast = scaler.inverse_transform(future_forecast)
+    for diff in forecasts:
+        curr += diff[0]
+        future_vals.append(curr)
 
-last_log_value = data_log.iloc[-1].values[0]
-future_values = []
+    future_vals = np.expm1(future_vals)
 
-current_value = last_log_value
-for diff in future_forecast:
-    current_value += diff[0]
-    future_values.append(current_value)
-
-future_values = np.expm1(future_values)
+    future_dates = [
+        series.index[-1] + pd.DateOffset(days=i+1)
+        for i in range(forecast_horizon)
+    ]
 
 # =====================================================
-# FORECAST DATAFRAME
+# FORECAST DF
 # =====================================================
-last_date = df.index[-1]
-
-future_dates = [
-    last_date + pd.DateOffset(months=i + 1)
-    for i in range(forecast_months)
-]
-
 forecast_df = pd.DataFrame({
     "Date": future_dates,
-    "Forecast": future_values
+    "Forecast": future_vals
 })
-
-# =====================================================
-# GROWTH %
-# =====================================================
-start_value = df[selected_field].iloc[-1]
-end_value = future_values[-1]
-
-growth_percent = ((end_value - start_value) / start_value) * 100
-
-# =====================================================
-# MAX PROJECTION
-# =====================================================
-max_value = forecast_df["Forecast"].max()
-max_date = forecast_df.loc[
-    forecast_df["Forecast"].idxmax(), "Date"
-]
 
 # =====================================================
 # PLOT
@@ -239,8 +261,8 @@ max_date = forecast_df.loc[
 fig = go.Figure()
 
 fig.add_trace(go.Scatter(
-    x=df.index,
-    y=df[selected_field],
+    x=series.index,
+    y=series.values,
     mode="lines",
     name="Actual"
 ))
@@ -253,7 +275,6 @@ fig.add_trace(go.Scatter(
 ))
 
 fig.update_layout(
-    title=f"{selected_field} Forecast Projection",
     template="plotly_white",
     height=550,
     xaxis_title="Date",
@@ -261,16 +282,6 @@ fig.update_layout(
 )
 
 st.plotly_chart(fig, use_container_width=True)
-
-# =====================================================
-# METRICS
-# =====================================================
-col1, col2, col3, col4 = st.columns(4)
-
-col1.metric("Max Projected Value", f"{max_value:,.2f}")
-col2.metric("Date of Maximum", max_date.strftime("%Y-%m"))
-col3.metric("Model Error (MAPE %)", f"{mape:.2f}%")
-col4.metric("Growth Over Range (%)", f"{growth_percent:.2f}%")
 
 st.markdown("### Forecast Table")
 st.dataframe(forecast_df, use_container_width=True)
