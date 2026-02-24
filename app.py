@@ -7,7 +7,6 @@ import plotly.graph_objects as go
 import tensorflow as tf
 
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_absolute_percentage_error
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
@@ -50,25 +49,26 @@ daily_projection = st.sidebar.checkbox(
     "Enable Daily Projection (Separate LSTM Model)"
 )
 
-# NEW LOGIC: Separate sliders
+# Monthly slider (disabled when daily enabled)
+monthly_horizon = st.sidebar.slider(
+    "Monthly Forecast Horizon (Months)",
+    min_value=1,
+    max_value=24,
+    value=6,
+    disabled=daily_projection
+)
+
+# Daily slider appears only when enabled
 if daily_projection:
     daily_horizon = st.sidebar.slider(
-        "Select Number of Days for Daily Projection",
-        min_value=7,
-        max_value=180,
-        value=30
-    )
-    forecast_horizon = daily_horizon
-else:
-    forecast_horizon = st.sidebar.slider(
-        "Forecast Horizon (Months)",
+        "Daily Forecast Horizon (Days)",
         min_value=1,
-        max_value=24,
-        value=6
+        max_value=30,
+        value=7
     )
 
 # =====================================================
-# LOAD MONTHLY DATA (DEFAULT)
+# LOAD MONTHLY DATA
 # =====================================================
 @st.cache_data
 def load_monthly_data():
@@ -84,7 +84,7 @@ def load_monthly_data():
     return df
 
 # =====================================================
-# LOAD DAILY DATA (ONLY WHEN ENABLED)
+# LOAD DAILY DATA
 # =====================================================
 @st.cache_data
 def load_daily_data():
@@ -98,36 +98,6 @@ def load_daily_data():
     df = df.sort_values("DATE")
     df.set_index("DATE", inplace=True)
     return df
-
-# =====================================================
-# DATA PREP FUNCTION
-# =====================================================
-def prepare_data(series, lookback):
-
-    series = series.astype(str)
-    series = series.str.replace(r"[^\d.]", "", regex=True)
-    series = pd.to_numeric(series, errors="coerce")
-    series = series.dropna()
-    series = series.astype(float)
-
-    if len(series) <= lookback + 5:
-        st.error(
-            f"After cleaning, only {len(series)} valid numeric rows remain."
-        )
-        st.stop()
-
-    data_log = np.log1p(series)
-    data_diff = pd.Series(data_log).diff().dropna()
-
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(data_diff.values.reshape(-1, 1))
-
-    X, y = [], []
-    for i in range(lookback, len(scaled)):
-        X.append(scaled[i-lookback:i])
-        y.append(scaled[i])
-
-    return np.array(X), np.array(y), scaler, data_log
 
 # =====================================================
 # MODEL TRAIN FUNCTION
@@ -160,7 +130,7 @@ def train_model(X_train, y_train, X_test, y_test, lookback):
     return model
 
 # =====================================================
-# MONTHLY MODE
+# MONTHLY MODE (UNCHANGED)
 # =====================================================
 if not daily_projection:
 
@@ -175,20 +145,30 @@ if not daily_projection:
 
     series = df[selected_field].resample("M").sum()
 
+    series = series.astype(float)
+
+    data_log = np.log1p(series)
+    data_diff = data_log.diff().dropna()
+
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(data_diff.values.reshape(-1, 1))
+
     lookback = 18
-    X, y, scaler, data_log = prepare_data(series, lookback)
+    X, y = [], []
+    for i in range(lookback, len(scaled)):
+        X.append(scaled[i-lookback:i])
+        y.append(scaled[i])
+
+    X, y = np.array(X), np.array(y)
 
     split = int(len(X) * 0.8)
     model = train_model(X[:split], y[:split], X[split:], y[split:], lookback)
 
-    last_sequence = scaler.transform(
-        data_log.diff().dropna().values.reshape(-1, 1)
-    )[-lookback:]
-
+    last_sequence = scaled[-lookback:]
     current_seq = last_sequence.reshape(1, lookback, 1)
-    forecasts = []
 
-    for _ in range(forecast_horizon):
+    forecasts = []
+    for _ in range(monthly_horizon):
         pred = model.predict(current_seq, verbose=0)[0]
         forecasts.append(pred)
         current_seq = np.append(current_seq[:, 1:, :], [[pred]], axis=1)
@@ -207,20 +187,20 @@ if not daily_projection:
 
     future_dates = [
         series.index[-1] + pd.DateOffset(months=i+1)
-        for i in range(forecast_horizon)
+        for i in range(monthly_horizon)
     ]
 
     st.markdown("## Monthly Projection Results")
 
 # =====================================================
-# DAILY MODE
+# DAILY MODE (FIXED — NO ARTIFICIAL DIP)
 # =====================================================
 else:
 
     df = load_daily_data()
 
     df.columns = df.columns.str.strip()
-    available_fields = [col for col in df.columns]
+    available_fields = [col for col in df.columns if col.upper() != "DATE"]
 
     selected_field = st.sidebar.selectbox(
         "Select Daily Projection Field",
@@ -229,50 +209,60 @@ else:
 
     series = df[selected_field]
 
+    # Clean numeric
+    series = series.astype(str)
+    series = series.str.replace(r"[^\d.]", "", regex=True)
+    series = pd.to_numeric(series, errors="coerce").dropna()
+    series = series.astype(float)
+
+    if len(series) < 60:
+        st.error("Not enough daily data for stable training.")
+        st.stop()
+
+    # 🔥 NO DIFFERENCING
+    data_log = np.log1p(series)
+
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(data_log.values.reshape(-1, 1))
+
     lookback = 30
-    X, y, scaler, data_log = prepare_data(series, lookback)
+    X, y = [], []
+
+    for i in range(lookback, len(scaled)):
+        X.append(scaled[i-lookback:i])
+        y.append(scaled[i])
+
+    X, y = np.array(X), np.array(y)
 
     split = int(len(X) * 0.8)
     model = train_model(X[:split], y[:split], X[split:], y[split:], lookback)
 
-    last_sequence = scaler.transform(
-        data_log.diff().dropna().values.reshape(-1, 1)
-    )[-lookback:]
-
+    last_sequence = scaled[-lookback:]
     current_seq = last_sequence.reshape(1, lookback, 1)
+
     forecasts = []
 
-    for _ in range(forecast_horizon):
+    for _ in range(daily_horizon):
         pred = model.predict(current_seq, verbose=0)[0]
         forecasts.append(pred)
         current_seq = np.append(current_seq[:, 1:, :], [[pred]], axis=1)
 
     forecasts = scaler.inverse_transform(forecasts)
-
-    last_log = data_log.iloc[-1]
-    future_vals = []
-    curr = last_log
-
-    for diff in forecasts:
-        curr += diff[0]
-        future_vals.append(curr)
-
-    future_vals = np.expm1(future_vals)
+    future_vals = np.expm1(np.array(forecasts).flatten())
 
     future_dates = [
         series.index[-1] + pd.DateOffset(days=i+1)
-        for i in range(forecast_horizon)
+        for i in range(daily_horizon)
     ]
 
-    # 🔥 SHOW MAX PROJECTION DAY
+    # 🔥 Max Projection Label
     max_idx = np.argmax(future_vals)
     st.success(
         f"📈 Maximum projected transactions on "
-        f"{future_dates[max_idx].date()} "
-        f"→ {int(future_vals[max_idx]):,}"
+        f"{future_dates[max_idx].date()} → {int(future_vals[max_idx]):,}"
     )
 
-    # 🔥 Limit graph to last 30 days
+    # 🔥 Graph only last 30 days
     series = series.tail(30)
 
     st.markdown("## 🔥 Daily Projection Results")
