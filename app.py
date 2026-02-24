@@ -195,7 +195,8 @@ if not daily_projection:
 # =====================================================
 # =====================================================
 # =====================================================
-# DAILY MODE (DIRECT MULTI-STEP FORECAST - NO DIP)
+# =====================================================
+# DAILY MODE (TREND + LSTM HYBRID MODEL)
 # =====================================================
 else:
 
@@ -214,16 +215,28 @@ else:
     series = pd.to_numeric(series, errors="coerce").dropna()
     series = series.astype(float)
 
-    if len(series) < 90:
+    if len(series) < 120:
         st.error("Not enough daily data for stable training.")
         st.stop()
 
+    # ===============================
+    # 1️⃣ TREND ESTIMATION (Linear)
+    # ===============================
+    t = np.arange(len(series))
+    coef = np.polyfit(t, series.values, 1)
+    trend = coef[0] * t + coef[1]
+
+    residual = series.values - trend
+
+    # ===============================
+    # 2️⃣ SCALE RESIDUALS
+    # ===============================
     from sklearn.preprocessing import StandardScaler
     scaler = StandardScaler()
-    scaled = scaler.fit_transform(series.values.reshape(-1, 1))
+    scaled = scaler.fit_transform(residual.reshape(-1, 1))
 
     lookback = 30
-    horizon = daily_horizon   # your new daily slider
+    horizon = daily_horizon
 
     X, y = [], []
 
@@ -240,7 +253,7 @@ else:
         LSTM(64, return_sequences=True, input_shape=(lookback, 1)),
         Dropout(0.2),
         LSTM(32),
-        Dense(horizon)  # 🔥 MULTI-OUTPUT
+        Dense(horizon)
     ])
 
     model.compile(optimizer="adam", loss="mse")
@@ -258,27 +271,39 @@ else:
         verbose=0
     )
 
-    # Direct forecast (NO RECURSION)
+    # ===============================
+    # 3️⃣ FORECAST RESIDUALS
+    # ===============================
     last_sequence = scaled[-lookback:].reshape(1, lookback, 1)
-    future_scaled = model.predict(last_sequence, verbose=0)
+    future_residual_scaled = model.predict(last_sequence, verbose=0)
 
-    future_vals = scaler.inverse_transform(
-        future_scaled.reshape(-1, 1)
+    future_residual = scaler.inverse_transform(
+        future_residual_scaled.reshape(-1, 1)
     ).flatten()
+
+    # ===============================
+    # 4️⃣ EXTEND TREND
+    # ===============================
+    future_t = np.arange(len(series), len(series) + horizon)
+    future_trend = coef[0] * future_t + coef[1]
+
+    future_vals = future_trend + future_residual
 
     future_dates = [
         series.index[-1] + pd.DateOffset(days=i+1)
         for i in range(horizon)
     ]
 
-    # Show max projection label
+    # ===============================
+    # MAX PROJECTION LABEL
+    # ===============================
     max_idx = np.argmax(future_vals)
     st.success(
-        f"📈 Maximum projected transactions on "
+        f"Maximum projected transactions on "
         f"{future_dates[max_idx].date()} → {int(future_vals[max_idx]):,}"
     )
 
-    # Show only last 30 days in graph
+    # Show last 30 days only
     series = series.tail(30)
 
     st.markdown("## 🔥 Daily Projection Results")
