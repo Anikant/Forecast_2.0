@@ -42,9 +42,9 @@ def load_data(file):
 
     required_cols = [
         "DATE",
-        "Total UPI financial transactional logs",
-        "Total UPI non financial transactional logs",
-        "Total UPI Transactions"
+        "Total UPI FinancialTRANSACTION LOG",
+        "Total UPI Non-FinancialTRANSACTION LOG",
+        "Total Upi Transaction"
     ]
 
     for col in required_cols:
