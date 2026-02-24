@@ -193,10 +193,7 @@ if not daily_projection:
     st.markdown("## Monthly Projection Results")
 
 # =====================================================
-# =====================================================
-# =====================================================
-# =====================================================
-# DAILY MODE (TREND + LSTM HYBRID MODEL)
+# DAILY MODE (COMPOUND GROWTH LSTM - FINAL FIX)
 # =====================================================
 else:
 
@@ -219,21 +216,14 @@ else:
         st.error("Not enough daily data for stable training.")
         st.stop()
 
-    # ===============================
-    # 1️⃣ TREND ESTIMATION (Linear)
-    # ===============================
-    t = np.arange(len(series))
-    coef = np.polyfit(t, series.values, 1)
-    trend = coef[0] * t + coef[1]
+    # ==========================================
+    # 1️⃣ MODEL DAILY GROWTH RATE
+    # ==========================================
+    growth = series.pct_change().dropna()
 
-    residual = series.values - trend
-
-    # ===============================
-    # 2️⃣ SCALE RESIDUALS
-    # ===============================
     from sklearn.preprocessing import StandardScaler
     scaler = StandardScaler()
-    scaled = scaler.fit_transform(residual.reshape(-1, 1))
+    scaled = scaler.fit_transform(growth.values.reshape(-1, 1))
 
     lookback = 30
     horizon = daily_horizon
@@ -271,39 +261,41 @@ else:
         verbose=0
     )
 
-    # ===============================
-    # 3️⃣ FORECAST RESIDUALS
-    # ===============================
+    # ==========================================
+    # 2️⃣ DIRECT MULTI-STEP GROWTH FORECAST
+    # ==========================================
     last_sequence = scaled[-lookback:].reshape(1, lookback, 1)
-    future_residual_scaled = model.predict(last_sequence, verbose=0)
+    future_growth_scaled = model.predict(last_sequence, verbose=0)
 
-    future_residual = scaler.inverse_transform(
-        future_residual_scaled.reshape(-1, 1)
+    future_growth = scaler.inverse_transform(
+        future_growth_scaled.reshape(-1, 1)
     ).flatten()
 
-    # ===============================
-    # 4️⃣ EXTEND TREND
-    # ===============================
-    future_t = np.arange(len(series), len(series) + horizon)
-    future_trend = coef[0] * future_t + coef[1]
+    # ==========================================
+    # 3️⃣ RECONSTRUCT LEVEL USING COMPOUNDING
+    # ==========================================
+    last_value = series.iloc[-1]
+    future_vals = []
 
-    future_vals = future_trend + future_residual
+    for g in future_growth:
+        last_value = last_value * (1 + g)
+        future_vals.append(last_value)
 
     future_dates = [
         series.index[-1] + pd.DateOffset(days=i+1)
         for i in range(horizon)
     ]
 
-    # ===============================
+    # ==========================================
     # MAX PROJECTION LABEL
-    # ===============================
+    # ==========================================
     max_idx = np.argmax(future_vals)
     st.success(
-        f"Maximum projected transactions on "
+        f"📈 Maximum projected transactions on "
         f"{future_dates[max_idx].date()} → {int(future_vals[max_idx]):,}"
     )
 
-    # Show last 30 days only
+    # Show only last 30 days
     series = series.tail(30)
 
     st.markdown("## 🔥 Daily Projection Results")
