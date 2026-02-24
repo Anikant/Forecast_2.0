@@ -195,27 +195,36 @@ if not daily_projection:
     st.markdown("## Monthly Projection Results")
 
 # =====================================================
+# =====================================================
 # DAILY MODE (SEPARATE WINDOW)
 # =====================================================
 else:
 
     df = load_daily_data()
 
-    fields = [
-        "Total UPI financial transactional logs",
-        "Total UPI non financial transactional logs",
-        "total upi transactions"
-    ]
+    # Normalize columns safely
+    df.columns = df.columns.str.strip()
+
+    # Exclude DATE column automatically
+    available_fields = [col for col in df.columns if col.upper() != "DATE"]
+
+    if not available_fields:
+        st.error("No valid transaction columns found in merged_upi_transactions.xlsx")
+        st.stop()
 
     selected_field = st.sidebar.selectbox(
         "Select Daily Projection Field",
-        fields
+        available_fields
     )
 
     series = df[selected_field]
 
     lookback = 30
     X, y, scaler, data_log = prepare_data(series, lookback)
+
+    if len(X) < 10:
+        st.error("Not enough daily historical data for training.")
+        st.stop()
 
     split = int(len(X) * 0.8)
     X_train, X_test = X[:split], X[split:]
@@ -253,7 +262,6 @@ else:
     ]
 
     st.markdown("## 🔥 Daily Projection Results")
-
 # =====================================================
 # FORECAST DF
 # =====================================================
