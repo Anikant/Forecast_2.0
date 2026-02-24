@@ -42,87 +42,10 @@ UPI Transaction Forecasting Engine (Monthly + Daily Deterministic LSTM)
 st.markdown("---")
 
 # =====================================================
-# LOAD DATA (Cloud Safe)
-# =====================================================
-uploaded_file = st.file_uploader(
-    "Upload merged_upi_transactions.xlsx",
-    type=["xlsx"]
-)
-
-if uploaded_file is None:
-    st.warning("Please upload merged_upi_transactions.xlsx to proceed.")
-    st.stop()
-
-@st.cache_data
-def load_data(file):
-    df = pd.read_excel(file)
-
-    # Normalize column names (CRITICAL FIX)
-    df.columns = (
-        df.columns
-        .str.strip()
-        .str.lower()
-        .str.replace("  ", " ")
-    )
-
-    # Create mapping dictionary (flexible matching)
-    column_mapping = {}
-
-    for col in df.columns:
-        if "date" in col:
-            column_mapping[col] = "DATE"
-
-        elif "financial" in col:
-            column_mapping[col] = "Total UPI financial transactional logs"
-
-        elif "non" in col:
-            column_mapping[col] = "Total UPI non financial transactional logs"
-
-        elif "total" in col and "upi" in col:
-            column_mapping[col] = "total upi transactions"
-
-    df = df.rename(columns=column_mapping)
-
-    required_cols = [
-        "DATE",
-        "Total UPI financial transactional logs",
-        "Total UPI non financial transactional logs",
-        "total upi transactions"
-    ]
-
-    missing = [c for c in required_cols if c not in df.columns]
-
-    if missing:
-        st.error(f"Missing required columns: {missing}")
-        st.write("Available columns detected:", list(df.columns))
-        st.stop()
-
-    df["DATE"] = pd.to_datetime(df["DATE"], errors="coerce")
-    df = df.dropna(subset=["DATE"])
-    df = df.sort_values("DATE")
-    df.set_index("DATE", inplace=True)
-
-    return df
-
-df = load_data(uploaded_file)
-
-# =====================================================
 # SIDEBAR
 # =====================================================
 st.sidebar.header("Forecast Settings")
 
-fields = [
-    "Total UPI FinancialTRANSACTION LOG",
-    "Total UPI Non-FinancialTRANSACTION LOG",
-    "total Upi Transaction"
-]
-
-selected_field = st.sidebar.selectbox(
-    "Select Projection Field",
-    fields
-)
-
-# 🔥 NEW DAILY PROJECTION TOGGLE (ABOVE SLIDER)
 daily_projection = st.sidebar.checkbox(
     "Enable Daily Projection (Separate LSTM Model)"
 )
@@ -135,7 +58,41 @@ forecast_horizon = st.sidebar.slider(
 )
 
 # =====================================================
-# DATA PREPARATION FUNCTION
+# LOAD MONTHLY DATA (DEFAULT)
+# =====================================================
+@st.cache_data
+def load_monthly_data():
+    file_path = "data/UPI_Transactions.xlsx"
+    if not os.path.exists(file_path):
+        st.error("UPI_Transactions.xlsx not found in data folder.")
+        st.stop()
+
+    df = pd.read_excel(file_path, engine="openpyxl")
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.sort_values("Date")
+    df.set_index("Date", inplace=True)
+    return df
+
+# =====================================================
+# LOAD DAILY DATA (ONLY WHEN ENABLED)
+# =====================================================
+@st.cache_data
+def load_daily_data():
+    file_path = "data/merged_upi_transactions.xlsx"
+    if not os.path.exists(file_path):
+        st.error("merged_upi_transactions.xlsx not found in data folder.")
+        st.stop()
+
+    df = pd.read_excel(file_path, engine="openpyxl")
+
+    df["DATE"] = pd.to_datetime(df["DATE"])
+    df = df.sort_values("DATE")
+    df.set_index("DATE", inplace=True)
+
+    return df
+
+# =====================================================
+# DATA PREP FUNCTION
 # =====================================================
 def prepare_data(series, lookback):
     data_log = np.log1p(series)
@@ -166,10 +123,7 @@ def train_model(X_train, y_train, X_test, y_test, lookback):
 
     model.compile(optimizer="adam", loss="mse")
 
-    early_stop = EarlyStopping(
-        patience=5,
-        restore_best_weights=True
-    )
+    early_stop = EarlyStopping(patience=5, restore_best_weights=True)
 
     model.fit(
         X_train,
@@ -185,9 +139,18 @@ def train_model(X_train, y_train, X_test, y_test, lookback):
     return model
 
 # =====================================================
-# MONTHLY MODEL
+# MONTHLY MODE (DEFAULT)
 # =====================================================
 if not daily_projection:
+
+    df = load_monthly_data()
+
+    fields = ["Remitter", "Benificiary", "Total"]
+
+    selected_field = st.sidebar.selectbox(
+        "Select Projection Field",
+        fields
+    )
 
     series = df[selected_field].resample("M").sum()
 
@@ -229,10 +192,25 @@ if not daily_projection:
         for i in range(forecast_horizon)
     ]
 
+    st.markdown("## Monthly Projection Results")
+
 # =====================================================
-# DAILY MODEL (SEPARATE LSTM)
+# DAILY MODE (SEPARATE WINDOW)
 # =====================================================
 else:
+
+    df = load_daily_data()
+
+    fields = [
+        "Total UPI financial transactional logs",
+        "Total UPI non financial transactional logs",
+        "total upi transactions"
+    ]
+
+    selected_field = st.sidebar.selectbox(
+        "Select Daily Projection Field",
+        fields
+    )
 
     series = df[selected_field]
 
@@ -273,6 +251,8 @@ else:
         series.index[-1] + pd.DateOffset(days=i+1)
         for i in range(forecast_horizon)
     ]
+
+    st.markdown("## 🔥 Daily Projection Results")
 
 # =====================================================
 # FORECAST DF
