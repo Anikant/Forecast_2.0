@@ -61,8 +61,8 @@ def load_data(file):
     required_cols = [
         "DATE",
         "Total UPI FinancialTRANSACTION LOG",
-        "Total UPI non financial transactional logs",
-        "total upi transactions"
+        "Total UPI Non-FinancialTRANSACTION LOG",
+        "total Upi Transaction"
     ]
 
     for col in required_cols:
@@ -85,9 +85,9 @@ df = load_data(uploaded_file)
 st.sidebar.header("Forecast Settings")
 
 fields = [
-    "Total UPI financial transactional logs",
-    "Total UPI non financial transactional logs",
-    "total upi transactions"
+    "Total UPI FinancialTRANSACTION LOG",
+    "Total UPI Non-FinancialTRANSACTION LOG",
+    "total Upi Transaction"
 ]
 
 selected_field = st.sidebar.selectbox(
