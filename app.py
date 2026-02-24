@@ -1,341 +1,217 @@
-import os
-import random
-import numpy as np
-import pandas as pd
 import streamlit as st
+import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 import tensorflow as tf
-
-from sklearn.preprocessing import MinMaxScaler
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_absolute_error
+import os
 
-# =====================================================
-# 🔒 FULL DETERMINISM
-# =====================================================
-SEED = 42
-os.environ["PYTHONHASHSEED"] = str(SEED)
-os.environ["TF_DETERMINISTIC_OPS"] = "1"
+st.set_page_config(layout="wide")
 
-random.seed(SEED)
-np.random.seed(SEED)
-tf.random.set_seed(SEED)
+# ==========================
+# CONFIG
+# ==========================
+LOOKBACK = 60
+EPOCHS = 120
+BATCH_SIZE = 32
 
-try:
-    tf.config.experimental.enable_op_determinism()
-except:
-    pass
-
-# =====================================================
-# STREAMLIT CONFIG
-# =====================================================
-st.set_page_config(page_title="UPI LSTM Forecast", layout="wide")
-
-st.markdown("""
-<h1 style='text-align: center; color: #1F4E79;'>
-UPI Transaction Forecasting Engine (Monthly + Daily Deterministic LSTM)
-</h1>
-""", unsafe_allow_html=True)
-
-st.markdown("---")
-
-# =====================================================
-# SIDEBAR
-# =====================================================
-st.sidebar.header("Forecast Settings")
-
-daily_projection = st.sidebar.checkbox(
-    "Enable Daily Projection (Separate LSTM Model)"
-)
-
-# Monthly slider (disabled when daily enabled)
-monthly_horizon = st.sidebar.slider(
-    "Monthly Forecast Horizon (Months)",
-    min_value=1,
-    max_value=24,
-    value=6,
-    disabled=daily_projection
-)
-
-# Daily slider appears only when enabled
-if daily_projection:
-    daily_horizon = st.sidebar.slider(
-        "Daily Forecast Horizon (Days)",
-        min_value=1,
-        max_value=30,
-        value=7
-    )
-
-# =====================================================
-# LOAD MONTHLY DATA
-# =====================================================
+# ==========================
+# LOAD DATA FUNCTION
+# ==========================
 @st.cache_data
-def load_monthly_data():
-    file_path = "data/UPI_Transactions.xlsx"
-    if not os.path.exists(file_path):
-        st.error("UPI_Transactions.xlsx not found in data folder.")
-        st.stop()
-
-    df = pd.read_excel(file_path, engine="openpyxl")
-    df["Date"] = pd.to_datetime(df["Date"])
-    df = df.sort_values("Date")
-    df.set_index("Date", inplace=True)
+def load_data(file_path):
+    df = pd.read_excel(file_path)
+    df.columns = df.columns.str.strip()
+    df = df.replace([np.inf, -np.inf], np.nan)
+    df = df.dropna()
     return df
 
-# =====================================================
-# LOAD DAILY DATA
-# =====================================================
-@st.cache_data
-def load_daily_data():
-    file_path = "data/merged_upi_transactions.xlsx"
-    if not os.path.exists(file_path):
-        st.error("merged_upi_transactions.xlsx not found in data folder.")
-        st.stop()
+# ==========================
+# PREPARE MULTIVARIATE DATA
+# ==========================
+def prepare_data(df, target_col):
 
-    df = pd.read_excel(file_path, engine="openpyxl")
+    # keep only numeric columns
+    df_numeric = df.select_dtypes(include=[np.number]).copy()
+
+    if target_col not in df_numeric.columns:
+        raise ValueError(f"{target_col} not numeric or missing.")
+
+    scaler = MinMaxScaler()
+    scaled_data = scaler.fit_transform(df_numeric)
+
+    X, y = [], []
+    for i in range(LOOKBACK, len(scaled_data)):
+        X.append(scaled_data[i-LOOKBACK:i])
+        y.append(scaled_data[i, df_numeric.columns.get_loc(target_col)])
+
+    return np.array(X), np.array(y), scaler, df_numeric
+
+# ==========================
+# BUILD PURE ML MODEL
+# ==========================
+def build_model(input_shape):
+    model = Sequential()
+    model.add(LSTM(128, return_sequences=True, input_shape=input_shape))
+    model.add(Dropout(0.2))
+    model.add(LSTM(64))
+    model.add(Dense(32, activation="relu"))
+    model.add(Dense(1))
+    model.compile(
+        optimizer="adam",
+        loss=tf.keras.losses.Huber()
+    )
+    return model
+
+# ==========================
+# FORECAST FUNCTION
+# ==========================
+def forecast_future(model, df_numeric, scaler, target_col, steps):
+
+    scaled_data = scaler.transform(df_numeric)
+    input_seq = scaled_data[-LOOKBACK:].copy()
+    predictions = []
+
+    for _ in range(steps):
+        pred = model.predict(input_seq.reshape(1, LOOKBACK, -1), verbose=0)[0][0]
+        predictions.append(pred)
+
+        next_row = input_seq[-1].copy()
+        next_row[df_numeric.columns.get_loc(target_col)] = pred
+
+        input_seq = np.vstack([input_seq[1:], next_row])
+
+    # inverse scaling
+    dummy = np.zeros((len(predictions), df_numeric.shape[1]))
+    dummy[:, df_numeric.columns.get_loc(target_col)] = predictions
+    inv = scaler.inverse_transform(dummy)
+
+    return inv[:, df_numeric.columns.get_loc(target_col)]
+
+# ==========================
+# TITLE
+# ==========================
+st.title("UPI Pure ML Forecast Engine 2.0")
+
+# ==========================
+# MODE TOGGLE
+# ==========================
+daily_mode = st.toggle("Enable Daily Projection Mode")
+
+if daily_mode:
+    file_path = "data/merged_upi_transactions.xlsx"
+else:
+    file_path = "data/UPI_Transactions.xlsx"
+
+if not os.path.exists(file_path):
+    st.error(f"{file_path} not found in data folder.")
+    st.stop()
+
+df = load_data(file_path)
+
+# ==========================
+# DATE HANDLING
+# ==========================
+if "DATE" in df.columns:
     df["DATE"] = pd.to_datetime(df["DATE"])
     df = df.sort_values("DATE")
     df.set_index("DATE", inplace=True)
-    return df
-
-# =====================================================
-# MODEL TRAIN FUNCTION
-# =====================================================
-@st.cache_resource
-def train_model(X_train, y_train, X_test, y_test, lookback):
-
-    model = Sequential([
-        LSTM(64, return_sequences=True, input_shape=(lookback, 1)),
-        Dropout(0.2),
-        LSTM(32),
-        Dense(1)
-    ])
-
-    model.compile(optimizer="adam", loss="mse")
-
-    early_stop = EarlyStopping(patience=5, restore_best_weights=True)
-
-    model.fit(
-        X_train,
-        y_train,
-        epochs=120,
-        batch_size=8,
-        validation_data=(X_test, y_test),
-        shuffle=False,
-        callbacks=[early_stop],
-        verbose=0
-    )
-
-    return model
-
-# =====================================================
-# MONTHLY MODE (UNCHANGED)
-# =====================================================
-if not daily_projection:
-
-    df = load_monthly_data()
-
-    fields = ["Remitter", "Benificiary", "Total"]
-
-    selected_field = st.sidebar.selectbox(
-        "Select Projection Field",
-        fields
-    )
-
-    series = df[selected_field].resample("M").sum()
-
-    series = series.astype(float)
-
-    data_log = np.log1p(series)
-    data_diff = data_log.diff().dropna()
-
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(data_diff.values.reshape(-1, 1))
-
-    lookback = 18
-    X, y = [], []
-    for i in range(lookback, len(scaled)):
-        X.append(scaled[i-lookback:i])
-        y.append(scaled[i])
-
-    X, y = np.array(X), np.array(y)
-
-    split = int(len(X) * 0.8)
-    model = train_model(X[:split], y[:split], X[split:], y[split:], lookback)
-
-    last_sequence = scaled[-lookback:]
-    current_seq = last_sequence.reshape(1, lookback, 1)
-
-    forecasts = []
-    for _ in range(monthly_horizon):
-        pred = model.predict(current_seq, verbose=0)[0]
-        forecasts.append(pred)
-        current_seq = np.append(current_seq[:, 1:, :], [[pred]], axis=1)
-
-    forecasts = scaler.inverse_transform(forecasts)
-
-    last_log = data_log.iloc[-1]
-    future_vals = []
-    curr = last_log
-
-    for diff in forecasts:
-        curr += diff[0]
-        future_vals.append(curr)
-
-    future_vals = np.expm1(future_vals)
-
-    future_dates = [
-        series.index[-1] + pd.DateOffset(months=i+1)
-        for i in range(monthly_horizon)
-    ]
-
-    st.markdown("## Monthly Projection Results")
-
-# =====================================================
-# DAILY MODE (COMPOUND GROWTH LSTM - FINAL FIX)
-# =====================================================
 else:
+    st.error("DATE column missing.")
+    st.stop()
 
-    df = load_daily_data()
-    df.columns = df.columns.str.strip()
-    available_fields = [col for col in df.columns if col.upper() != "DATE"]
+# ==========================
+# TARGET COLUMN
+# ==========================
+target_col = st.selectbox("Select Target Column", df.select_dtypes(include=[np.number]).columns)
 
-    selected_field = st.sidebar.selectbox(
-        "Select Daily Projection Field",
-        available_fields
+# ==========================
+# SLIDERS
+# ==========================
+if daily_mode:
+    days = st.slider("Select Number of Days for Projection", 7, 90, 30)
+else:
+    months = st.slider("Select Number of Months for Projection", 1, 12, 3)
+
+# ==========================
+# PREPARE DATA
+# ==========================
+try:
+    X, y, scaler, df_numeric = prepare_data(df, target_col)
+except Exception as e:
+    st.error(str(e))
+    st.stop()
+
+if len(X) < 100:
+    st.error("Not enough data for ML training.")
+    st.stop()
+
+# ==========================
+# TRAIN MODEL
+# ==========================
+with st.spinner("Training Pure Multivariate ML Model..."):
+
+    model = build_model((X.shape[1], X.shape[2]))
+
+    early_stop = EarlyStopping(
+        monitor="loss",
+        patience=15,
+        restore_best_weights=True
     )
-
-    # Clean numeric
-    series = df[selected_field].astype(str)
-    series = series.str.replace(r"[^\d.]", "", regex=True)
-    series = pd.to_numeric(series, errors="coerce").dropna()
-    series = series.astype(float)
-
-    if len(series) < 120:
-        st.error("Not enough daily data for stable training.")
-        st.stop()
-
-    # ==========================================
-    # 1️⃣ MODEL DAILY GROWTH RATE
-    # ==========================================
-    growth = series.pct_change().dropna()
-
-    from sklearn.preprocessing import StandardScaler
-    scaler = StandardScaler()
-    scaled = scaler.fit_transform(growth.values.reshape(-1, 1))
-
-    lookback = 30
-    horizon = daily_horizon
-
-    X, y = [], []
-
-    for i in range(lookback, len(scaled) - horizon):
-        X.append(scaled[i-lookback:i])
-        y.append(scaled[i:i+horizon].flatten())
-
-    X = np.array(X)
-    y = np.array(y)
-
-    split = int(len(X) * 0.8)
-
-    model = Sequential([
-        LSTM(64, return_sequences=True, input_shape=(lookback, 1)),
-        Dropout(0.2),
-        LSTM(32),
-        Dense(horizon)
-    ])
-
-    model.compile(optimizer="adam", loss="mse")
-
-    early_stop = EarlyStopping(patience=5, restore_best_weights=True)
 
     model.fit(
-        X[:split],
-        y[:split],
-        epochs=100,
-        batch_size=8,
-        validation_data=(X[split:], y[split:]),
-        shuffle=False,
-        callbacks=[early_stop],
-        verbose=0
+        X, y,
+        epochs=EPOCHS,
+        batch_size=BATCH_SIZE,
+        verbose=0,
+        callbacks=[early_stop]
     )
 
-    # ==========================================
-    # 2️⃣ DIRECT MULTI-STEP GROWTH FORECAST
-    # ==========================================
-    last_sequence = scaled[-lookback:].reshape(1, lookback, 1)
-    future_growth_scaled = model.predict(last_sequence, verbose=0)
+# ==========================
+# FORECAST
+# ==========================
+if daily_mode:
+    future_values = forecast_future(model, df_numeric, scaler, target_col, days)
+    future_index = pd.date_range(df.index[-1] + pd.Timedelta(days=1), periods=days, freq="D")
+else:
+    future_values = forecast_future(model, df_numeric, scaler, target_col, months)
+    future_index = pd.date_range(df.index[-1] + pd.offsets.MonthBegin(1), periods=months, freq="MS")
 
-    future_growth = scaler.inverse_transform(
-        future_growth_scaled.reshape(-1, 1)
-    ).flatten()
+# ==========================
+# GRAPH WINDOW (LAST 30 DAYS + FUTURE)
+# ==========================
+recent_data = df[target_col].last("30D")
 
-    # ==========================================
-    # 3️⃣ RECONSTRUCT LEVEL USING COMPOUNDING
-    # ==========================================
-    last_value = series.iloc[-1]
-    future_vals = []
-
-    for g in future_growth:
-        last_value = last_value * (1 + g)
-        future_vals.append(last_value)
-
-    future_dates = [
-        series.index[-1] + pd.DateOffset(days=i+1)
-        for i in range(horizon)
-    ]
-
-    # ==========================================
-    # MAX PROJECTION LABEL
-    # ==========================================
-    max_idx = np.argmax(future_vals)
-    st.success(
-        f"📈 Maximum projected transactions on "
-        f"{future_dates[max_idx].date()} → {int(future_vals[max_idx]):,}"
-    )
-
-    # Show only last 30 days
-    series = series.tail(30)
-
-    st.markdown("## 🔥 Daily Projection Results")
-# =====================================================
-# FORECAST DF
-# =====================================================
-forecast_df = pd.DataFrame({
-    "Date": future_dates,
-    "Forecast": future_vals
-})
-
-# =====================================================
-# PLOT
-# =====================================================
 fig = go.Figure()
 
 fig.add_trace(go.Scatter(
-    x=series.index,
-    y=series.values,
-    mode="lines",
-    name="Actual"
+    x=recent_data.index,
+    y=recent_data.values,
+    mode='lines',
+    name="Last 30 Days"
 ))
 
 fig.add_trace(go.Scatter(
-    x=forecast_df["Date"],
-    y=forecast_df["Forecast"],
-    mode="lines+markers",
-    name="Forecast"
+    x=future_index,
+    y=future_values,
+    mode='lines',
+    name="Projection"
 ))
-
-fig.update_layout(
-    template="plotly_white",
-    height=550,
-    xaxis_title="Date",
-    yaxis_title="Transaction Count"
-)
 
 st.plotly_chart(fig, use_container_width=True)
 
-st.markdown("### Forecast Table")
-st.dataframe(forecast_df, use_container_width=True)
+# ==========================
+# MAX DAY LABEL (DAILY MODE)
+# ==========================
+if daily_mode:
+    max_idx = np.argmax(future_values)
+    max_day = future_index[max_idx]
+    max_val = future_values[max_idx]
 
-st.success("Deterministic forecast generated successfully.")
+    st.success(f"Maximum Projected Day: {max_day.date()} | Value: {round(max_val,2)}")
+
+st.success("Pure ML Forecast Complete.")
