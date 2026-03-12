@@ -94,6 +94,7 @@ def forecast_series(series, horizon, dates):
 
     series = series.astype(float)
 
+    # remove extreme outliers
     q_low = series.quantile(0.01)
     q_high = series.quantile(0.99)
     series = series.clip(q_low, q_high)
@@ -111,20 +112,19 @@ def forecast_series(series, horizon, dates):
     future_vals = []
     future_dates = []
 
-    first_date = dates.iloc[-1] + pd.DateOffset(days=1)
-
+    # anchor forecast at last actual point
     future_vals.append(last_actual)
-    future_dates.append(first_date)
+    future_dates.append(dates.iloc[-1])
 
     prev_val = last_actual
 
     for i in range(1, horizon):
 
-        next_date = dates.iloc[-1] + pd.DateOffset(days=i+1)
+        next_date = dates.iloc[-1] + pd.DateOffset(days=i)
 
-        damping = 1 / (1 + 0.03*i)
+        damping = 1 / (1 + 0.03 * i)
 
-        noise = np.random.normal(0, growth.std()*0.15)
+        noise = np.random.normal(0, growth.std() * 0.15)
 
         g = avg_growth * damping + noise
 
@@ -140,7 +140,6 @@ def forecast_series(series, horizon, dates):
 
     future_vals = pd.Series(future_vals)
 
-    # smooth except first point
     smoothed = future_vals.copy()
     smoothed.iloc[1:] = future_vals.iloc[1:].rolling(3, min_periods=1).mean()
 
@@ -203,9 +202,9 @@ else:
 
     for i in range(forecast_months):
 
-        damping = 1 / (1 + 0.2*i)
+        damping = 1 / (1 + 0.2 * i)
 
-        noise = np.random.normal(0, growth.std()*0.3)
+        noise = np.random.normal(0, growth.std() * 0.3)
 
         g = avg_growth * damping + noise
 
@@ -214,7 +213,7 @@ else:
         future_vals.append(value)
 
         future_dates.append(
-            series.index[-1] + pd.DateOffset(months=i+1)
+            series.index[-1] + pd.DateOffset(months=i + 1)
         )
 
         last_val = value
@@ -261,11 +260,9 @@ last_actual = history.values[-1]
 growth_pct = ((future_vals - last_actual) / last_actual) * 100
 
 forecast_df = pd.DataFrame({
-
     "Date": future_dates,
     "Forecast": future_vals,
     "Growth %": growth_pct
-
 })
 
 st.subheader("Forecast Table")
