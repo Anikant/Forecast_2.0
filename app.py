@@ -10,9 +10,9 @@ st.set_page_config(page_title="UPI Forecast Engine", layout="wide")
 
 st.title("UPI Transaction Forecast")
 
-# ---------------------------
-# HOLIDAYS (INDIA 2026)
-# ---------------------------
+# -----------------------------
+# HOLIDAYS (India 2026)
+# -----------------------------
 
 HOLIDAYS_2026 = pd.to_datetime([
 "2026-01-01","2026-01-14","2026-01-26","2026-02-15","2026-03-04",
@@ -22,9 +22,9 @@ HOLIDAYS_2026 = pd.to_datetime([
 "2026-10-20","2026-11-08","2026-11-24","2026-12-25"
 ])
 
-# ---------------------------
+# -----------------------------
 # SIDEBAR
-# ---------------------------
+# -----------------------------
 
 st.sidebar.header("Forecast Settings")
 
@@ -48,9 +48,9 @@ else:
         6
     )
 
-# ---------------------------
-# DATA LOADERS
-# ---------------------------
+# -----------------------------
+# DATA LOADING
+# -----------------------------
 
 @st.cache_data
 def load_daily():
@@ -86,70 +86,62 @@ def load_monthly():
     return df
 
 
-# ---------------------------
-# FORECAST MODEL
-# ---------------------------
+# -----------------------------
+# FORECAST FUNCTION
+# -----------------------------
 
 def forecast_series(series, horizon, dates):
 
     series = series.astype(float)
 
     # remove extreme outliers
-    low = series.quantile(0.01)
-    high = series.quantile(0.99)
+    q_low = series.quantile(0.01)
+    q_high = series.quantile(0.99)
+    series = series.clip(q_low, q_high)
 
-    series = series.clip(low, high)
+    # smoothing
+    smooth = series.ewm(span=8).mean()
 
-    # smooth baseline
-    series = series.ewm(span=10).mean()
+    # growth calculation
+    growth = smooth.pct_change().dropna()
 
-    # trend
-    trend = series.rolling(14, min_periods=1).mean()
+    base_growth = growth.rolling(14).mean().dropna()
 
-    x = np.arange(len(trend))
+    avg_growth = base_growth.mean()
 
-    coef = np.polyfit(x, trend, 2)
-
-    trend_model = np.poly1d(coef)
-
-    # seasonality
-    seasonal = series - trend
-    weekly_pattern = seasonal.groupby(series.index % 7).mean()
+    last_val = series.iloc[-1]
 
     future_vals = []
     future_dates = []
 
-    last_idx = len(series)
-
     for i in range(horizon):
-
-        idx = last_idx + i
-
-        base = trend_model(idx)
-
-        weekly_adj = weekly_pattern[idx % 7]
-
-        noise = np.random.normal(0, series.std()*0.015)
-
-        value = base + weekly_adj + noise
 
         next_date = dates.iloc[-1] + pd.DateOffset(days=i+1)
 
+        damping = 1 / (1 + 0.03*i)
+
+        noise = np.random.normal(0, growth.std()*0.25)
+
+        g = avg_growth * damping + noise
+
+        value = last_val * (1 + g)
+
         if next_date in HOLIDAYS_2026:
-            value *= 1.04
+            value *= 1.03
 
         future_vals.append(value)
-
         future_dates.append(next_date)
 
-    future_vals = pd.Series(future_vals).rolling(3,min_periods=1).mean().values
+        last_val = value
+
+    future_vals = pd.Series(future_vals).rolling(3, min_periods=1).mean().values
 
     return future_vals, future_dates
 
 
-# ---------------------------
+# -----------------------------
 # DAILY FORECAST
-# ---------------------------
+# -----------------------------
 
 if daily_projection:
 
@@ -162,7 +154,7 @@ if daily_projection:
         numeric_cols
     )
 
-    data = df[["DATE",field]].rename(columns={field:"y"})
+    data = df[["DATE", field]].rename(columns={field: "y"})
 
     series = data["y"]
 
@@ -173,12 +165,11 @@ if daily_projection:
     )
 
     history = series.tail(30)
-
     history_dates = data["DATE"].tail(30)
 
-# ---------------------------
+# -----------------------------
 # MONTHLY FORECAST
-# ---------------------------
+# -----------------------------
 
 else:
 
@@ -193,42 +184,40 @@ else:
 
     series = series.ewm(span=6).mean()
 
-    x = np.arange(len(series))
+    growth = series.pct_change().dropna()
 
-    coef = np.polyfit(x,series,2)
+    avg_growth = growth.mean()
 
-    trend_model = np.poly1d(coef)
+    last_val = series.iloc[-1]
 
     future_vals = []
-
     future_dates = []
-
-    last_idx = len(series)
 
     for i in range(forecast_months):
 
-        idx = last_idx+i
+        damping = 1 / (1 + 0.2*i)
 
-        base = trend_model(idx)
+        noise = np.random.normal(0, growth.std()*0.3)
 
-        noise = np.random.normal(0,series.std()*0.02)
+        g = avg_growth * damping + noise
 
-        value = base+noise
+        value = last_val * (1 + g)
 
         future_vals.append(value)
 
         future_dates.append(
-            series.index[-1]+pd.DateOffset(months=i+1)
+            series.index[-1] + pd.DateOffset(months=i+1)
         )
 
-    history = series.tail(30)
+        last_val = value
 
+    history = series.tail(30)
     history_dates = history.index
 
 
-# ---------------------------
+# -----------------------------
 # GRAPH
-# ---------------------------
+# -----------------------------
 
 fig = go.Figure()
 
@@ -253,33 +242,33 @@ fig.update_layout(
     yaxis_title="Transaction Volume"
 )
 
-st.plotly_chart(fig,use_container_width=True)
+st.plotly_chart(fig, use_container_width=True)
 
-# ---------------------------
+# -----------------------------
 # FORECAST TABLE
-# ---------------------------
+# -----------------------------
 
 last_actual = history.values[-1]
 
-growth_pct = ((future_vals-last_actual)/last_actual)*100
+growth_pct = ((future_vals - last_actual) / last_actual) * 100
 
 forecast_df = pd.DataFrame({
 
-"Date":future_dates,
-"Forecast":future_vals,
-"Growth %":growth_pct
+    "Date": future_dates,
+    "Forecast": future_vals,
+    "Growth %": growth_pct
 
 })
 
 st.subheader("Forecast Table")
 
-st.dataframe(forecast_df,use_container_width=True)
+st.dataframe(forecast_df, use_container_width=True)
 
 max_idx = np.argmax(future_vals)
 
 st.write(
-"Maximum projected date:",
-future_dates[max_idx],
-"Projected value:",
-round(future_vals[max_idx],2)
+    "Maximum projected date:",
+    future_dates[max_idx],
+    "Projected value:",
+    round(future_vals[max_idx], 2)
 )
