@@ -10,9 +10,9 @@ st.set_page_config(page_title="UPI Forecast Engine", layout="wide")
 
 st.title("UPI Transaction Forecast")
 
-# -----------------------------
-# HOLIDAYS (India 2026)
-# -----------------------------
+# -------------------------
+# HOLIDAYS INDIA 2026
+# -------------------------
 
 HOLIDAYS_2026 = pd.to_datetime([
 "2026-01-01","2026-01-14","2026-01-26","2026-02-15","2026-03-04",
@@ -22,38 +22,30 @@ HOLIDAYS_2026 = pd.to_datetime([
 "2026-10-20","2026-11-08","2026-11-24","2026-12-25"
 ])
 
-# -----------------------------
+# -------------------------
 # SIDEBAR
-# -----------------------------
+# -------------------------
 
-st.sidebar.header("Forecast Settings")
+st.sidebar.header("Projection Settings")
 
-daily_projection = st.sidebar.checkbox("Enable Daily Projection")
+mode = st.sidebar.radio(
+    "Projection Mode",
+    ["Daily","Monthly"]
+)
 
-if daily_projection:
+days = st.sidebar.slider(
+    "Forecast Horizon (Days)",
+    30,
+    365,
+    120
+)
 
-    forecast_days = st.sidebar.slider(
-        "Daily Forecast Horizon (Days)",
-        7,
-        120,
-        30
-    )
-
-else:
-
-    forecast_months = st.sidebar.slider(
-        "Monthly Forecast Horizon (Months)",
-        1,
-        24,
-        6
-    )
-
-# -----------------------------
-# DATA LOADING
-# -----------------------------
+# -------------------------
+# LOAD DATA
+# -------------------------
 
 @st.cache_data
-def load_daily():
+def load_data():
 
     df = pd.read_excel(
         "data/merged_upi_transactions.xlsx",
@@ -69,50 +61,38 @@ def load_daily():
     return df
 
 
-@st.cache_data
-def load_monthly():
+df = load_data()
 
-    df = pd.read_excel(
-        "data/UPI_Transactions.xlsx",
-        engine="openpyxl"
-    )
+numeric_cols = df.select_dtypes(include=np.number).columns
 
-    df["Date"] = pd.to_datetime(df["Date"])
+field = st.sidebar.selectbox(
+    "Select Projection Field",
+    numeric_cols
+)
 
-    df = df.sort_values("Date")
+series = df[field]
+dates = df["DATE"]
 
-    df.set_index("Date", inplace=True)
+# -------------------------
+# FORECAST ENGINE
+# -------------------------
 
-    return df
-
-
-# -----------------------------
-# FORECAST FUNCTION
-# -----------------------------
-
-def forecast_series(series, horizon, dates):
+def forecast_daily(series, horizon, dates):
 
     series = series.astype(float)
 
-    # remove extreme outliers
-    q_low = series.quantile(0.01)
-    q_high = series.quantile(0.99)
-    series = series.clip(q_low, q_high)
-
-    smooth = series.ewm(span=8).mean()
+    # smooth trend
+    smooth = series.ewm(span=10).mean()
 
     growth = smooth.pct_change().dropna()
 
-    base_growth = growth.rolling(14).mean().dropna()
-
-    avg_growth = base_growth.mean()
+    avg_growth = growth.tail(30).mean()
 
     last_actual = series.iloc[-1]
 
     future_vals = []
     future_dates = []
 
-    # anchor forecast at last actual point
     future_vals.append(last_actual)
     future_dates.append(dates.iloc[-1])
 
@@ -122,109 +102,65 @@ def forecast_series(series, horizon, dates):
 
         next_date = dates.iloc[-1] + pd.DateOffset(days=i)
 
-        damping = 1 / (1 + 0.03 * i)
+        # damping to prevent exponential explosion
+        damping = 1/(1 + 0.025*i)
 
-        noise = np.random.normal(0, growth.std() * 0.15)
+        noise = np.random.normal(0, growth.std()*0.1)
 
-        g = avg_growth * damping + noise
+        g = avg_growth*damping + noise
 
-        value = prev_val * (1 + g)
+        value = prev_val*(1+g)
 
+        # holiday adjustment
         if next_date in HOLIDAYS_2026:
-            value *= 1.03
+            value *= 1.02
 
         future_vals.append(value)
         future_dates.append(next_date)
 
         prev_val = value
 
-    future_vals = pd.Series(future_vals)
-
-    smoothed = future_vals.copy()
-    smoothed.iloc[1:] = future_vals.iloc[1:].rolling(3, min_periods=1).mean()
-
-    return smoothed.values, future_dates
+    return pd.Series(future_vals, index=future_dates)
 
 
-# -----------------------------
-# DAILY FORECAST
-# -----------------------------
+forecast_series = forecast_daily(series, days, dates)
 
-if daily_projection:
+# -------------------------
+# DAILY VIEW
+# -------------------------
 
-    df = load_daily()
-
-    numeric_cols = df.select_dtypes(include=np.number).columns
-
-    field = st.sidebar.selectbox(
-        "Select Projection Field",
-        numeric_cols
-    )
-
-    data = df[["DATE", field]].rename(columns={field: "y"})
-
-    series = data["y"]
-
-    future_vals, future_dates = forecast_series(
-        series,
-        forecast_days,
-        data["DATE"]
-    )
+if mode == "Daily":
 
     history = series.tail(30)
-    history_dates = data["DATE"].tail(30)
+    history_dates = dates.tail(30)
 
-# -----------------------------
-# MONTHLY FORECAST
-# -----------------------------
+    future_vals = forecast_series.values
+    future_dates = forecast_series.index
+
+# -------------------------
+# MONTHLY VIEW
+# -------------------------
 
 else:
 
-    df = load_monthly()
+    full_series = pd.concat([
+        pd.Series(series.values,index=dates),
+        forecast_series.iloc[1:]
+    ])
 
-    field = st.sidebar.selectbox(
-        "Select Projection Field",
-        df.columns
-    )
+    monthly = full_series.resample("M").sum()
 
-    series = df[field].resample("M").sum()
+    history = monthly.iloc[-6:-1]
+    future = monthly.iloc[-1:]
 
-    series = series.ewm(span=6).mean()
-
-    growth = series.pct_change().dropna()
-
-    avg_growth = growth.mean()
-
-    last_val = series.iloc[-1]
-
-    future_vals = []
-    future_dates = []
-
-    for i in range(forecast_months):
-
-        damping = 1 / (1 + 0.2 * i)
-
-        noise = np.random.normal(0, growth.std() * 0.3)
-
-        g = avg_growth * damping + noise
-
-        value = last_val * (1 + g)
-
-        future_vals.append(value)
-
-        future_dates.append(
-            series.index[-1] + pd.DateOffset(months=i + 1)
-        )
-
-        last_val = value
-
-    history = series.tail(30)
     history_dates = history.index
+    future_dates = future.index
 
+    future_vals = future.values
 
-# -----------------------------
+# -------------------------
 # GRAPH
-# -----------------------------
+# -------------------------
 
 fig = go.Figure()
 
@@ -246,34 +182,25 @@ fig.update_layout(
     template="plotly_white",
     height=550,
     xaxis_title="Date",
-    yaxis_title="Transaction Volume"
+    yaxis_title="Value"
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig,use_container_width=True)
 
-# -----------------------------
-# FORECAST TABLE
-# -----------------------------
+# -------------------------
+# TABLE
+# -------------------------
 
 last_actual = history.values[-1]
 
-growth_pct = ((future_vals - last_actual) / last_actual) * 100
+growth_pct = ((future_vals-last_actual)/last_actual)*100
 
-forecast_df = pd.DataFrame({
-    "Date": future_dates,
-    "Forecast": future_vals,
-    "Growth %": growth_pct
+table = pd.DataFrame({
+"Date":future_dates,
+"Forecast":future_vals,
+"Growth %":growth_pct
 })
 
-st.subheader("Forecast Table")
+st.subheader("Projection Table")
 
-st.dataframe(forecast_df, use_container_width=True)
-
-max_idx = np.argmax(future_vals)
-
-st.write(
-    "Maximum projected date:",
-    future_dates[max_idx],
-    "Projected value:",
-    round(future_vals[max_idx], 2)
-)
+st.dataframe(table,use_container_width=True)
