@@ -94,15 +94,12 @@ def forecast_series(series, horizon, dates):
 
     series = series.astype(float)
 
-    # remove extreme outliers
     q_low = series.quantile(0.01)
     q_high = series.quantile(0.99)
     series = series.clip(q_low, q_high)
 
-    # smooth
     smooth = series.ewm(span=8).mean()
 
-    # growth estimation
     growth = smooth.pct_change().dropna()
 
     base_growth = growth.rolling(14).mean().dropna()
@@ -114,7 +111,6 @@ def forecast_series(series, horizon, dates):
     future_vals = []
     future_dates = []
 
-    # ---- FIRST FORECAST POINT (ANCHOR) ----
     first_date = dates.iloc[-1] + pd.DateOffset(days=1)
 
     future_vals.append(last_actual)
@@ -122,7 +118,6 @@ def forecast_series(series, horizon, dates):
 
     prev_val = last_actual
 
-    # ---- REMAINING FORECAST ----
     for i in range(1, horizon):
 
         next_date = dates.iloc[-1] + pd.DateOffset(days=i+1)
@@ -143,9 +138,13 @@ def forecast_series(series, horizon, dates):
 
         prev_val = value
 
-    future_vals = pd.Series(future_vals).rolling(3, min_periods=1).mean().values
+    future_vals = pd.Series(future_vals)
 
-    return future_vals, future_dates
+    # smooth except first point
+    smoothed = future_vals.copy()
+    smoothed.iloc[1:] = future_vals.iloc[1:].rolling(3, min_periods=1).mean()
+
+    return smoothed.values, future_dates
 
 
 # -----------------------------
