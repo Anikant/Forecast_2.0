@@ -99,32 +99,41 @@ def forecast_series(series, horizon, dates):
     q_high = series.quantile(0.99)
     series = series.clip(q_low, q_high)
 
-    # smoothing
+    # smooth
     smooth = series.ewm(span=8).mean()
 
-    # growth calculation
+    # growth estimation
     growth = smooth.pct_change().dropna()
 
     base_growth = growth.rolling(14).mean().dropna()
 
     avg_growth = base_growth.mean()
 
-    last_val = series.iloc[-1]
+    last_actual = series.iloc[-1]
 
     future_vals = []
     future_dates = []
 
-    for i in range(horizon):
+    # ---- FIRST FORECAST POINT (ANCHOR) ----
+    first_date = dates.iloc[-1] + pd.DateOffset(days=1)
+
+    future_vals.append(last_actual)
+    future_dates.append(first_date)
+
+    prev_val = last_actual
+
+    # ---- REMAINING FORECAST ----
+    for i in range(1, horizon):
 
         next_date = dates.iloc[-1] + pd.DateOffset(days=i+1)
 
         damping = 1 / (1 + 0.03*i)
 
-        noise = np.random.normal(0, growth.std()*0.25)
+        noise = np.random.normal(0, growth.std()*0.15)
 
         g = avg_growth * damping + noise
 
-        value = last_val * (1 + g)
+        value = prev_val * (1 + g)
 
         if next_date in HOLIDAYS_2026:
             value *= 1.03
@@ -132,7 +141,7 @@ def forecast_series(series, horizon, dates):
         future_vals.append(value)
         future_dates.append(next_date)
 
-        last_val = value
+        prev_val = value
 
     future_vals = pd.Series(future_vals).rolling(3, min_periods=1).mean().values
 
