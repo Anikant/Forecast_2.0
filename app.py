@@ -112,11 +112,14 @@ def forecast_series(series, horizon, dates):
     future_vals = []
     future_dates = []
 
-    # anchor forecast at last actual point
+    # anchor forecast
     future_vals.append(last_actual)
     future_dates.append(dates.iloc[-1])
 
     prev_val = last_actual
+
+    # deterministic random generator
+    rng = np.random.default_rng(42)
 
     for i in range(1, horizon):
 
@@ -124,7 +127,7 @@ def forecast_series(series, horizon, dates):
 
         damping = 1 / (1 + 0.03 * i)
 
-        noise = np.random.normal(0, growth.std() * 0.15)
+        noise = rng.normal(0, growth.std() * 0.15)
 
         g = avg_growth * damping + noise
 
@@ -200,11 +203,13 @@ else:
     future_vals = []
     future_dates = []
 
+    rng = np.random.default_rng(42)
+
     for i in range(forecast_months):
 
         damping = 1 / (1 + 0.2 * i)
 
-        noise = np.random.normal(0, growth.std() * 0.3)
+        noise = rng.normal(0, growth.std() * 0.3)
 
         g = avg_growth * damping + noise
 
